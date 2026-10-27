@@ -1,0 +1,8 @@
+{
+  "name": "statusline",
+  "version": "1.0.0",
+  "description": "Status line with git branch, model, context and session/weekly usage",
+  "author": {
+    "name": "Andrei Ozdon"
+  }
+}
