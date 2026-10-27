@@ -236,10 +236,18 @@ NEED_API=1
 [[ "$REFRESH_INTERVAL" =~ ^[0-9]+$ ]] || REFRESH_INTERVAL=300
 
 # Lock outside world-writable /tmp to avoid a symlink/clobber on shared hosts.
-LOCK_FILE="${XDG_RUNTIME_DIR:-$HOME/.claude}/statusline-refresh.lock"
+# mkdir, not flock: it is atomic everywhere, and macOS ships no flock.
+LOCK_DIR="${XDG_RUNTIME_DIR:-$HOME/.claude}/statusline-refresh.lock.d"
+LOCK_STALE_SEC=30   # a lock left by a killed render; a refresh takes ≤3s (curl --max-time)
 if [ "$NEED_API" = 1 ] && [ "$(cache_age_sec)" -gt "$REFRESH_INTERVAL" ]; then
-    # 2>/dev/null: if the lock dir is missing, skip the refresh quietly (no stderr noise)
-    ( flock -n 9 || exit 0; refresh_usage_api ) 9>"$LOCK_FILE" 2>/dev/null
+    if [ -d "$LOCK_DIR" ] && [ $(( $(date +%s) - $(file_mtime "$LOCK_DIR") )) -gt "$LOCK_STALE_SEC" ]; then
+        rmdir "$LOCK_DIR" 2>/dev/null
+    fi
+    # 2>/dev/null: if the lock's parent dir is missing, skip the refresh quietly (no stderr noise)
+    if mkdir "$LOCK_DIR" 2>/dev/null; then
+        refresh_usage_api
+        rmdir "$LOCK_DIR" 2>/dev/null
+    fi
 fi
 
 # ── Resolve usage metrics: native stdin (preferred) → API cache (fallback) ────
