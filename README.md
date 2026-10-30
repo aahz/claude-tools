@@ -2,6 +2,13 @@
 
 Personal Claude Code plugin marketplace.
 
+Also includes a [native Codex CLI status-line adaptation](plugins/statusline/CODEX.md)
+for context capacity, 5-hour and weekly limits:
+
+```sh
+bash plugins/statusline/scripts/codex.sh
+```
+
 ## Install
 
 ```

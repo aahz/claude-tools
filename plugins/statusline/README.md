@@ -1,5 +1,8 @@
 # statusline
 
+For Codex CLI, see [the native Codex adaptation](CODEX.md). The Claude Code
+installation and renderer below are specific to Claude Code.
+
 Status line for Claude Code: git branch, model and effort, context window, session (5h) usage with reset countdown, optional weekly quotas, cost and duration.
 
 ```
