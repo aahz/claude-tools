@@ -3,11 +3,11 @@
 For Codex CLI, see [the native Codex adaptation](CODEX.md). The Claude Code
 installation and renderer below are specific to Claude Code.
 
-Status line for Claude Code: git branch, model and effort, context window, session (5h) usage with reset countdown, optional long-period quota (weekly for Claude, monthly for Kimi), cost and duration. Works with both the Anthropic API and Kimi for Coding (`ANTHROPIC_BASE_URL=https://api.kimi.ai/coding/`).
+Status line for Claude Code: git branch, model and effort, context window, session (5h) usage with reset countdown, optional long-period quota with reset date (weekly for Claude, monthly for Kimi), cost and duration. Works with both the Anthropic API and Kimi for Coding (`ANTHROPIC_BASE_URL=https://api.kimi.ai/coding/`).
 
 ```
-main★ │ Opus 5.5/hi │ Ctx ▓▓▓▓▓░░░░░░░ 42% │ session ▓▓▓▓░░░░░░░░ 35% restarts in 2h30m │ weekly ▓▓░░░░░░░░░░ 18% │ $0.12 · 1h4m
-main★ │ Kimi K2     │ Ctx ▓▓▓▓▓░░░░░░░ 42% │ session ▓▓▓▓░░░░░░░░ 30% restarts in 2h30m │ monthly ▓▓░░░░░░░░░░ 18%
+main★ │ Opus 5.5/hi │ Ctx ▓▓▓▓▓░░░░░░░ 42% │ session ▓▓▓▓░░░░░░░░ 35% restarts in 2h30m │ weekly ▓▓░░░░░░░░░░ 18% resets Nov 12 15:00 │ $0.12 · 1h4m
+main★ │ Kimi K2     │ Ctx ▓▓▓▓▓░░░░░░░ 42% │ session ▓▓▓▓░░░░░░░░ 30% restarts in 2h30m │ monthly ▓▓░░░░░░░░░░ 18% resets Dec 1 00:00
 ```
 
 ## Install
@@ -40,8 +40,8 @@ A `statusLine` that already points to some other command is left untouched. To s
 | Model / effort | `Opus 5.5/hi` | model from the status line input; effort (`lo`, `md`, `hi`, `mx`) from `effortLevel` in `settings.json` |
 | Context | `Ctx ▓▓▓░░ 42%` | context window usage; the label becomes `1M` for the extended 1M context |
 | Session | `session ▓▓░░ 35% restarts in 2h30m` | 5-hour usage limit and time until it resets (Claude and Kimi) |
-| Weekly | `weekly ▓░░░ 18% / sonnet 7%` | Claude 7-day limits; shown only with `STATUSLINE_SHOW_WEEKLY=1` |
-| Monthly | `monthly ▓░░░ 18%` | Kimi monthly shared pool; shown only with `STATUSLINE_SHOW_WEEKLY=1` |
+| Weekly | `weekly ▓░░░ 18% / sonnet 7% resets Nov 12 15:00` | Claude 7-day limits and the date/time they reset; shown only with `STATUSLINE_SHOW_WEEKLY=1` |
+| Monthly | `monthly ▓░░░ 18% resets Dec 1 00:00` | Kimi monthly shared pool and the date/time it resets; shown only with `STATUSLINE_SHOW_WEEKLY=1` |
 | Cost · duration | `$0.12 · 1h4m` | session cost and wall time, shown when non-zero |
 
 Bars are green below 50%, yellow below 80%, red from 80%.

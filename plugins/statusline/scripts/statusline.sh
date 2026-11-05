@@ -5,8 +5,8 @@
 # Dependencies: bash, jq, curl
 # License: MIT
 #
-# Claude: main★ │ Sonnet 5 │ Ctx ▓▓▓▓▓▓░░░░░░ 42% │ session ▓▓▓▓▓▓▓░░░░░ 35% restarts in 2h30m │ weekly ▓▓░░░░░░░░░░ 18% │ $0.12 · 1h4m
-# Kimi:   main★ │ kimi-k2  │ Ctx ▓▓▓▓▓▓░░░░░░ 42% │ session ▓▓▓▓▓▓▓░░░░░ 35% restarts in 2h30m │ monthly ▓▓░░░░░░░░░░ 18%
+# Claude: main★ │ Sonnet 5 │ Ctx ▓▓▓▓▓▓░░░░░░ 42% │ session ▓▓▓▓▓▓▓░░░░░ 35% restarts in 2h30m │ weekly ▓▓░░░░░░░░░░ 18% resets Nov 12 15:00 │ $0.12 · 1h4m
+# Kimi:   main★ │ kimi-k2  │ Ctx ▓▓▓▓▓▓░░░░░░ 42% │ session ▓▓▓▓▓▓▓░░░░░ 35% restarts in 2h30m │ monthly ▓▓░░░░░░░░░░ 18% resets Dec 1 00:00
 # ════════════════════════════════════════════════════════════════════════════
 
 # ── Configuration (override via STATUSLINE_-prefixed environment variables) ───
@@ -92,6 +92,28 @@ iso_to_epoch() {
     date -juf "%Y-%m-%dT%H:%M:%S" "$core" +%s 2>/dev/null
 }
 
+# Cached resets_at → epoch. Claude sends ISO 8601; Kimi sends epoch
+# seconds or milliseconds — normalize both.
+reset_to_epoch() {
+    local v="$1"
+    case "$v" in
+        *[!0-9.]*|*.*.*|"") iso_to_epoch "$v" ;;   # ISO 8601 or junk
+        *[0-9]*.*)          echo "${v%%.*}" ;;      # epoch with fraction
+        *[0-9])
+            [ "${#v}" -gt 11 ] && v="${v%???}"      # epoch millis → seconds
+            echo "$v" ;;
+    esac
+}
+
+# Epoch → local "Nov 10 14:30" (GNU date -d @ || BSD date -r). Unlike the
+# session countdown, a weekly/monthly window is far off, so an absolute date
+# reads better.
+epoch_to_local() {
+    local e="$1"
+    date -d "@$e" "+%b %-d %H:%M" 2>/dev/null && return
+    date -r "$e" "+%b %-d %H:%M" 2>/dev/null
+}
+
 file_mtime() {
     if stat --version &>/dev/null; then
         stat -c %Y "$1" 2>/dev/null || echo 0
@@ -173,7 +195,7 @@ JSON=$(cat)
 # rate_limits). rate_limits.* is native since Claude Code 2.1.x (Pro/Max) —
 # preferred over the API call when present.
 IFS=$'\x1f' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DURATION J_CWD \
-    J_RL_5H_PCT J_RL_5H_RESET J_RL_7D_PCT \
+    J_RL_5H_PCT J_RL_5H_RESET J_RL_7D_PCT J_RL_7D_RESET \
     < <(echo "$JSON" | jq -r '[
         (if .model | type == "object" then .model.display_name // "" else "" end),
         (if .model | type == "string" then .model else "" end),
@@ -184,7 +206,8 @@ IFS=$'\x1f' read -r J_MODEL_DISPLAY J_MODEL_RAW J_CTX_PCT J_CTX_SIZE J_COST J_DU
         (.workspace.current_dir // ""),
         (.rate_limits.five_hour.used_percentage // ""),
         (.rate_limits.five_hour.resets_at // ""),
-        (.rate_limits.seven_day.used_percentage // "")
+        (.rate_limits.seven_day.used_percentage // ""),
+        (.rate_limits.seven_day.resets_at // "")
     ] | join("\u001f")' 2>/dev/null)
 
 # ── Model ─────────────────────────────────────────────────────────────────────
@@ -272,11 +295,13 @@ refresh_claude_usage() {
             },
             week_all: {
                 percent_used: .seven_day.utilization,
-                percent_remaining: (100 - .seven_day.utilization)
+                percent_remaining: (100 - .seven_day.utilization),
+                resets_at: .seven_day.resets_at
             },
             week_sonnet: (if .seven_day_sonnet then {
                 percent_used: .seven_day_sonnet.utilization,
-                percent_remaining: (100 - .seven_day_sonnet.utilization)
+                percent_remaining: (100 - .seven_day_sonnet.utilization),
+                resets_at: .seven_day_sonnet.resets_at
             } else null end)
         }
     }' > "$tmp"; then
@@ -380,13 +405,13 @@ if [ "$NEED_API" = 1 ] && [ "$(cache_age_sec)" -gt "$REFRESH_INTERVAL" ]; then
 fi
 
 # ── Resolve usage metrics: native stdin (preferred) → API cache (fallback) ────
-# The reset countdown ("restarts in ...") belongs to the session window only —
-# a 7-day weekly window doesn't get one.
+# The session window gets a countdown ("restarts in ..."); the weekly/monthly
+# window is far off, so it gets an absolute reset date ("resets Nov 12 15:00").
 BLOCK_DISPLAY="" WEEK_SONNET_DISPLAY=""
 NOW=$(date +%s)
 
 SESS_PCT="" SESS_EPOCH="" SESS_FROM_CACHE=0
-WEEK_PCT="" SONNET_PCT="" MONTH_PCT=""
+WEEK_PCT="" WEEK_EPOCH="" SONNET_PCT="" SONNET_EPOCH="" MONTH_PCT="" MONTH_EPOCH=""
 
 # Leave the epoch empty when no reset is sent — num("") is "0", which render_quota
 # would read as a past reset and wrongly zero the live percentage.
@@ -396,30 +421,41 @@ if [ "$HAVE_STDIN_SESSION" = 1 ]; then
 fi
 if [ "$PROVIDER" = "claude" ] && [ "$SHOW_WEEKLY" = "1" ] && [ -n "$J_RL_7D_PCT" ] && [ "$J_RL_7D_PCT" != "null" ]; then
     WEEK_PCT="$J_RL_7D_PCT"
+    [ -n "$J_RL_7D_RESET" ] && [ "$J_RL_7D_RESET" != "null" ] && WEEK_EPOCH="$(num "$J_RL_7D_RESET")"
 fi
 
 # Cache only fills metrics stdin didn't provide, and only when it belongs to the
 # selected provider (cache_is_usable: valid JSON + matching/legacy provider tag).
 # Sonnet weekly and Kimi monthly quotas are API-only (absent from stdin).
 if cache_is_usable; then
-    IFS=$'\x1f' read -r CACHE_SOURCE U_SESS_PCT U_SESS_RESETS U_WEEK_PCT U_SONNET_PCT U_MONTH_PCT \
+    IFS=$'\x1f' read -r CACHE_SOURCE U_SESS_PCT U_SESS_RESETS U_WEEK_PCT U_WEEK_RESETS U_SONNET_PCT U_SONNET_RESETS U_MONTH_PCT U_MONTH_RESETS \
         < <(jq -r '[
             (.source // "legacy"),
-            (.metrics.session.percent_used     // ""),
-            (.metrics.session.resets_at        // ""),
-            (.metrics.week_all.percent_used    // ""),
-            (.metrics.week_sonnet.percent_used // ""),
-            (.metrics.month_all.percent_used   // "")
+            (.metrics.session.percent_used      // ""),
+            (.metrics.session.resets_at         // ""),
+            (.metrics.week_all.percent_used     // ""),
+            (.metrics.week_all.resets_at        // ""),
+            (.metrics.week_sonnet.percent_used  // ""),
+            (.metrics.week_sonnet.resets_at     // ""),
+            (.metrics.month_all.percent_used    // ""),
+            (.metrics.month_all.resets_at       // "")
         ] | join("\u001f")' "$USAGE_FILE" 2>/dev/null)
 
     if [ -z "$SESS_PCT" ] && [ -n "$U_SESS_PCT" ] && [ "$U_SESS_PCT" != "null" ]; then
         SESS_PCT="$U_SESS_PCT"; SESS_FROM_CACHE=1
-        [ "$CACHE_SOURCE" = "api" ] && [ -n "$U_SESS_RESETS" ] && [ "$U_SESS_RESETS" != "null" ] && SESS_EPOCH="$(iso_to_epoch "$U_SESS_RESETS")"
+        [ "$CACHE_SOURCE" = "api" ] && [ -n "$U_SESS_RESETS" ] && [ "$U_SESS_RESETS" != "null" ] && SESS_EPOCH="$(reset_to_epoch "$U_SESS_RESETS")"
     fi
     if [ "$SHOW_WEEKLY" = "1" ]; then
-        [ -z "$WEEK_PCT" ] && [ -n "$U_WEEK_PCT" ] && [ "$U_WEEK_PCT" != "null" ] && WEEK_PCT="$U_WEEK_PCT"
+        if [ -z "$WEEK_PCT" ] && [ -n "$U_WEEK_PCT" ] && [ "$U_WEEK_PCT" != "null" ]; then
+            WEEK_PCT="$U_WEEK_PCT"
+            [ "$CACHE_SOURCE" = "api" ] && [ -n "$U_WEEK_RESETS" ] && [ "$U_WEEK_RESETS" != "null" ] && WEEK_EPOCH="$(reset_to_epoch "$U_WEEK_RESETS")"
+        fi
         [ -n "$U_SONNET_PCT" ] && [ "$U_SONNET_PCT" != "null" ] && SONNET_PCT="$U_SONNET_PCT"
-        [ -n "$U_MONTH_PCT" ] && [ "$U_MONTH_PCT" != "null" ] && MONTH_PCT="$U_MONTH_PCT"
+        [ "$CACHE_SOURCE" = "api" ] && [ -n "$U_SONNET_RESETS" ] && [ "$U_SONNET_RESETS" != "null" ] && SONNET_EPOCH="$(reset_to_epoch "$U_SONNET_RESETS")"
+        if [ -n "$U_MONTH_PCT" ] && [ "$U_MONTH_PCT" != "null" ]; then
+            MONTH_PCT="$U_MONTH_PCT"
+            [ "$CACHE_SOURCE" = "api" ] && [ -n "$U_MONTH_RESETS" ] && [ "$U_MONTH_RESETS" != "null" ] && MONTH_EPOCH="$(reset_to_epoch "$U_MONTH_RESETS")"
+        fi
     fi
 fi
 
@@ -428,13 +464,28 @@ fi
     BLOCK_DISPLAY="$(render_quota "session" "$SESS_PCT" "$SESS_EPOCH")"
 
 if [ "$SHOW_WEEKLY" = "1" ] && [ "$PROVIDER" = "claude" ]; then
-    WEEK_INT="" WEEK_BAR="" SONNET_INT="" SONNET_BAR=""
+    WEEK_INT="" WEEK_BAR="" SONNET_INT="" SONNET_BAR="" WEEK_RESET_LABEL=""
+    # A reset moment already in the past means the window rolled over → usage back to 0%
+    # (same rule as render_quota applies to the session window).
     if [ -n "$WEEK_PCT" ] && [ "$WEEK_PCT" != "null" ]; then
-        WEEK_INT="$(num "$WEEK_PCT")"; make_bar "$WEEK_INT"; WEEK_BAR="$BAR_STR"
+        WEEK_INT="$(num "$WEEK_PCT")"
+        [ -n "$WEEK_EPOCH" ] && [ "$WEEK_EPOCH" -le "$NOW" ] 2>/dev/null && WEEK_INT=0
+        make_bar "$WEEK_INT"; WEEK_BAR="$BAR_STR"
     fi
     if [ -n "$SONNET_PCT" ] && [ "$SONNET_PCT" != "null" ]; then
-        SONNET_INT="$(num "$SONNET_PCT")"; make_bar "$SONNET_INT"; SONNET_BAR="$BAR_STR"
+        SONNET_INT="$(num "$SONNET_PCT")"
+        [ -n "$SONNET_EPOCH" ] && [ "$SONNET_EPOCH" -le "$NOW" ] 2>/dev/null && SONNET_INT=0
+        make_bar "$SONNET_INT"; SONNET_BAR="$BAR_STR"
     fi
+    # Show the nearest upcoming reset as an absolute local date. Both weekly
+    # windows normally reset together, so one label is enough — weekly wins,
+    # Sonnet is the fallback for when only the Sonnet quota is known.
+    for e in "$WEEK_EPOCH" "$SONNET_EPOCH"; do
+        if [ -n "$e" ] && [ "$e" -gt "$NOW" ] 2>/dev/null; then
+            WEEK_RESET_LABEL="resets $(epoch_to_local "$e")"
+            break
+        fi
+    done
     if [ -n "$WEEK_INT" ] && [ -n "$SONNET_INT" ]; then
         WEEK_SONNET_DISPLAY="weekly ${WEEK_BAR} ${WEEK_INT}% / sonnet ${SONNET_INT}%"
     elif [ -n "$WEEK_INT" ]; then
@@ -442,11 +493,18 @@ if [ "$SHOW_WEEKLY" = "1" ] && [ "$PROVIDER" = "claude" ]; then
     elif [ -n "$SONNET_INT" ]; then
         WEEK_SONNET_DISPLAY="sonnet ${SONNET_BAR} ${SONNET_INT}%"
     fi
+    [ -n "$WEEK_RESET_LABEL" ] && [ -n "$WEEK_SONNET_DISPLAY" ] && \
+        WEEK_SONNET_DISPLAY="${WEEK_SONNET_DISPLAY} ${WEEK_RESET_LABEL}"
 elif [ "$SHOW_WEEKLY" = "1" ] && [ "$PROVIDER" = "kimi" ] && [ -n "$MONTH_PCT" ] && [ "$MONTH_PCT" != "null" ]; then
     # Kimi has a monthly shared pool instead of a weekly one. limit_month_code is
     # a part of that pool, not a separate quota, so it is not shown on its own.
-    MONTH_INT="$(num "$MONTH_PCT")"; make_bar "$MONTH_INT"
+    MONTH_INT="$(num "$MONTH_PCT")"
+    [ -n "$MONTH_EPOCH" ] && [ "$MONTH_EPOCH" -le "$NOW" ] 2>/dev/null && MONTH_INT=0
+    make_bar "$MONTH_INT"
     WEEK_SONNET_DISPLAY="monthly ${BAR_STR} ${MONTH_INT}%"
+    if [ -n "$MONTH_EPOCH" ] && [ "$MONTH_EPOCH" -gt "$NOW" ] 2>/dev/null; then
+        WEEK_SONNET_DISPLAY="${WEEK_SONNET_DISPLAY} resets $(epoch_to_local "$MONTH_EPOCH")"
+    fi
 fi
 
 # ── Stale marker — appended as plain text. Only when session came from the
