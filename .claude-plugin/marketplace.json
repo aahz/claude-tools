@@ -10,7 +10,7 @@
     {
       "name": "statusline",
       "source": "./plugins/statusline",
-      "description": "Status line with git branch, model, context and session/weekly usage"
+      "description": "Status line with git branch, model, context and usage quotas for Claude and Kimi"
     }
   ]
 }

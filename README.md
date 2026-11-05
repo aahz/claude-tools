@@ -22,6 +22,6 @@ Restart Claude Code after the first install.
 
 ### statusline
 
-Status line: git branch, model/effort, context window, session (5h) usage with reset countdown, optional weekly quotas, cost and duration.
+Status line: git branch, model/effort, context window, session (5h) usage with reset countdown, optional long-period quota (Claude weekly / Kimi monthly), cost and duration. Supports both Anthropic and Kimi for Coding endpoints, auto-detected from `ANTHROPIC_BASE_URL`.
 
 Segments, options and how it installs itself: [plugins/statusline/README.md](plugins/statusline/README.md).

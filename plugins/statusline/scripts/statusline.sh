@@ -1,22 +1,69 @@
 #!/bin/bash
 # ════════════════════════════════════════════════════════════════════════════
-# Claude Code — Status Line with real-time usage tracking
+# Claude Code — Status Line with real-time usage tracking (Claude and Kimi)
 #
 # Dependencies: bash, jq, curl
 # License: MIT
 #
-# Default: main★ │ Sonnet 5 │ Ctx ▓▓▓▓▓▓░░░░░░ 42% │ session ▓▓▓▓▓▓▓░░░░░ 35% restarts in 2h30m │ weekly ▓▓░░░░░░░░░░ 18% │ $0.12 · 1h4m
+# Claude: main★ │ Sonnet 5 │ Ctx ▓▓▓▓▓▓░░░░░░ 42% │ session ▓▓▓▓▓▓▓░░░░░ 35% restarts in 2h30m │ weekly ▓▓░░░░░░░░░░ 18% │ $0.12 · 1h4m
+# Kimi:   main★ │ kimi-k2  │ Ctx ▓▓▓▓▓▓░░░░░░ 42% │ session ▓▓▓▓▓▓▓░░░░░ 35% restarts in 2h30m │ monthly ▓▓░░░░░░░░░░ 18%
 # ════════════════════════════════════════════════════════════════════════════
 
 # ── Configuration (override via STATUSLINE_-prefixed environment variables) ───
 REFRESH_INTERVAL="${STATUSLINE_REFRESH_INTERVAL:-300}"           # seconds between API calls (0 = every render, risks rate limiting)
-SHOW_WEEKLY="${STATUSLINE_SHOW_WEEKLY:-0}"                      # set to 1 to show weekly + sonnet quotas
+SHOW_WEEKLY="${STATUSLINE_SHOW_WEEKLY:-0}"                      # Claude: weekly + sonnet; Kimi: monthly quota
 SHOW_GIT="${STATUSLINE_SHOW_GIT:-1}"                            # set to 0 to hide the git branch segment
 BAR_WIDTH="${STATUSLINE_BAR_WIDTH:-12}"                         # progress bar width in characters
-USAGE_FILE="${STATUSLINE_USAGE_FILE:-$HOME/.claude/usage-exact.json}"
 CREDENTIALS_FILE="${STATUSLINE_CREDENTIALS_FILE:-$HOME/.claude/.credentials.json}"
 SETTINGS_FILE="${STATUSLINE_SETTINGS_FILE:-$HOME/.claude/settings.json}"
 BOTTOM_PADDING="${STATUSLINE_BOTTOM_PADDING:-1}"     # blank lines to print after the content, for vertical spacing
+
+# A recognized endpoint wins over STATUSLINE_PROVIDER. With no endpoint, the
+# setting selects the provider; with neither, preserve the original Claude mode.
+BASE_URL="${ANTHROPIC_BASE_URL:-}"
+PROVIDER_SETTING="${STATUSLINE_PROVIDER:-}"
+PROVIDER="unknown"
+KIMI_DEFAULT_BASE_URL="https://api.kimi.ai/coding"
+
+url_host() {
+    local url="$1" authority host
+    case "$url" in
+        http://*|https://*) ;;
+        *) return 1 ;;
+    esac
+    authority="${url#*://}"
+    authority="${authority%%/*}"
+    authority="${authority%%\?*}"
+    authority="${authority%%#*}"
+    # Credentials in a statusline endpoint are neither needed nor supported.
+    case "$authority" in
+        ""|*@*) return 1 ;;
+    esac
+    host="${authority%%:*}"
+    host="${host%.}"
+    printf '%s' "$host" | tr '[:upper:]' '[:lower:]'
+}
+
+if [ -n "$BASE_URL" ]; then
+    HOST="$(url_host "$BASE_URL")"
+    case "$HOST" in
+        api.anthropic.com) PROVIDER="claude" ;;
+        api.kimi.ai|api.kimi.com) PROVIDER="kimi" ;;
+    esac
+else
+    case "$PROVIDER_SETTING" in
+        "") PROVIDER="claude" ;;
+        claude|kimi) PROVIDER="$PROVIDER_SETTING" ;;
+    esac
+fi
+
+CLAUDE_USAGE_FILE="${STATUSLINE_USAGE_FILE:-$HOME/.claude/usage-exact.json}"
+KIMI_USAGE_FILE="${STATUSLINE_KIMI_USAGE_FILE:-$HOME/.claude/usage-kimi.json}"
+case "$PROVIDER" in
+    claude) USAGE_FILE="$CLAUDE_USAGE_FILE" ;;
+    kimi) USAGE_FILE="$KIMI_USAGE_FILE" ;;
+    *) USAGE_FILE="" ;;
+esac
 
 # ── Colors (ANSI, no emoji) ────────────────────────────────────────────────────
 C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'; C_DIM=$'\033[2m'; C_RESET=$'\033[0m'
@@ -53,8 +100,21 @@ file_mtime() {
     fi
 }
 
+cache_is_usable() {
+    [ -n "$USAGE_FILE" ] && [ -f "$USAGE_FILE" ] || return 1
+    jq -e 'type == "object" and (.metrics.session.percent_used | type == "number")' \
+        "$USAGE_FILE" >/dev/null 2>&1 || return 1
+    local cache_provider
+    cache_provider=$(jq -r '.provider // ""' "$USAGE_FILE" 2>/dev/null)
+    # Untagged files are the legacy Claude format; Kimi must always be explicit.
+    if [ "$PROVIDER" = "claude" ] && [ -z "$cache_provider" ]; then
+        return 0
+    fi
+    [ "$cache_provider" = "$PROVIDER" ]
+}
+
 cache_age_sec() {
-    [ ! -f "$USAGE_FILE" ] && echo 999999 && return
+    cache_is_usable || { echo 999999; return; }
     local age=$(( $(date +%s) - $(file_mtime "$USAGE_FILE") ))
     [ "$age" -lt 0 ] && age=0
     echo "$age"
@@ -185,8 +245,8 @@ if [ "$SHOW_GIT" = "1" ]; then
     [ "${#BRANCH}" -gt 30 ] && BRANCH="${BRANCH:0:27}..."
 fi
 
-# ── Refresh usage via Anthropic OAuth API ────────────────────────────────────
-refresh_usage_api() {
+# ── Refresh usage via the selected provider API ──────────────────────────────
+refresh_claude_usage() {
     [ ! -f "$CREDENTIALS_FILE" ] && return 1
     local token
     token=$(jq -r '.claudeAiOauth.accessToken // empty' "$CREDENTIALS_FILE" 2>/dev/null)
@@ -203,6 +263,7 @@ refresh_usage_api() {
     if echo "$resp" | jq '{
         timestamp: (now | todate),
         source: "api",
+        provider: "claude",
         metrics: {
             session: {
                 percent_used: .five_hour.utilization,
@@ -225,19 +286,87 @@ refresh_usage_api() {
     fi
 }
 
-# Native stdin rate_limits (Pro/Max, CC ≥2.1.x) cover session + weekly-all. The
-# API is only needed for the Sonnet quota (SHOW_WEEKLY) or as a fallback when the
-# stdin field is absent — so most renders make no network call at all.
+refresh_kimi_usage() {
+    # Match Claude Code's credential precedence. Kimi accepts the same secret as
+    # a Bearer token; never reuse Claude's OAuth credentials file here.
+    local token="${ANTHROPIC_AUTH_TOKEN:-${ANTHROPIC_API_KEY:-}}"
+    [ -z "$token" ] && return 1
+    local base_url="${BASE_URL:-$KIMI_DEFAULT_BASE_URL}"
+    local resp
+    resp=$(curl -s --max-time 3 \
+        "${base_url%/}/v1/usages" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" 2>/dev/null)
+
+    # The 300-minute detail is the same source used by Kimi's website. Some
+    # responses have a stale zero in usages.limit_5h, so keep that as fallback.
+    echo "$resp" | jq -e '
+        ([.limits[]? | select(.window.duration == 300 and .window.timeUnit == "TIME_UNIT_MINUTE")] | .[0]) as $window |
+        (($window.detail.limit // 0) | tonumber? // 0) as $limit |
+        (($window.detail.used // 0) | tonumber? // 0) as $used |
+        ($limit > 0 and $used >= 0) or (.usages.limit_5h.used_ratio | type == "number")
+    ' >/dev/null 2>&1 || return 1
+
+    local tmp
+    tmp=$(mktemp "${USAGE_FILE}.XXXXXX") || return 1
+    if echo "$resp" | jq '
+        def clamp_pct: if . < 0 then 0 elif . > 100 then 100 else . end;
+        ([.limits[]? | select(.window.duration == 300 and .window.timeUnit == "TIME_UNIT_MINUTE")] | .[0]) as $window |
+        (($window.detail.limit // 0) | tonumber? // 0) as $limit |
+        (($window.detail.used // 0) | tonumber? // 0) as $used |
+        (if $limit > 0 then ($used / $limit * 100)
+         else (.usages.limit_5h.used_ratio * 100) end | clamp_pct) as $session_pct |
+        {
+            timestamp: (now | todate),
+            source: "api",
+            provider: "kimi",
+            metrics: {
+                session: {
+                    percent_used: $session_pct,
+                    percent_remaining: (100 - $session_pct),
+                    resets_at: ($window.detail.resetTime // .usages.limit_5h.reset_time // null)
+                },
+                month_all: (if (.usages.limit_month_total.used_ratio | type == "number") then {
+                    percent_used: (.usages.limit_month_total.used_ratio * 100 | clamp_pct),
+                    percent_remaining: (100 - (.usages.limit_month_total.used_ratio * 100 | clamp_pct)),
+                    resets_at: .usages.limit_month_total.reset_time
+                } else null end)
+            }
+        }
+    ' > "$tmp"; then
+        mv "$tmp" "$USAGE_FILE"
+    else
+        rm -f "$tmp"; return 1
+    fi
+}
+
+refresh_usage_api() {
+    case "$PROVIDER" in
+        claude) refresh_claude_usage ;;
+        kimi) refresh_kimi_usage ;;
+        *) return 1 ;;
+    esac
+}
+
+# Native stdin rate_limits (Pro/Max, CC ≥2.1.x) are a Claude-only source; Kimi
+# usage always comes from its own API. Unknown providers never touch the network.
 HAVE_STDIN_SESSION=0
-[ -n "$J_RL_5H_PCT" ] && [ "$J_RL_5H_PCT" != "null" ] && HAVE_STDIN_SESSION=1
+if [ "$PROVIDER" = "claude" ] && [ -n "$J_RL_5H_PCT" ] && [ "$J_RL_5H_PCT" != "null" ]; then
+    HAVE_STDIN_SESSION=1
+fi
 NEED_API=1
-[ "$HAVE_STDIN_SESSION" = 1 ] && [ "$SHOW_WEEKLY" != "1" ] && NEED_API=0
+case "$PROVIDER" in
+    claude) [ "$HAVE_STDIN_SESSION" = 1 ] && [ "$SHOW_WEEKLY" != "1" ] && NEED_API=0 ;;
+    unknown) NEED_API=0 ;;
+esac
 
 [[ "$REFRESH_INTERVAL" =~ ^[0-9]+$ ]] || REFRESH_INTERVAL=300
 
 # Lock outside world-writable /tmp to avoid a symlink/clobber on shared hosts.
 # mkdir, not flock: it is atomic everywhere, and macOS ships no flock.
+# Per-provider: a Kimi refresh must not block or be blocked by a Claude one.
 LOCK_DIR="${XDG_RUNTIME_DIR:-$HOME/.claude}/statusline-refresh.lock.d"
+[ "$PROVIDER" = "kimi" ] && LOCK_DIR="${XDG_RUNTIME_DIR:-$HOME/.claude}/statusline-refresh-kimi.lock.d"
 LOCK_STALE_SEC=30   # a lock left by a killed render; a refresh takes ≤3s (curl --max-time)
 if [ "$NEED_API" = 1 ] && [ "$(cache_age_sec)" -gt "$REFRESH_INTERVAL" ]; then
     if [ -d "$LOCK_DIR" ] && [ $(( $(date +%s) - $(file_mtime "$LOCK_DIR") )) -gt "$LOCK_STALE_SEC" ]; then
@@ -257,7 +386,7 @@ BLOCK_DISPLAY="" WEEK_SONNET_DISPLAY=""
 NOW=$(date +%s)
 
 SESS_PCT="" SESS_EPOCH="" SESS_FROM_CACHE=0
-WEEK_PCT="" SONNET_PCT=""
+WEEK_PCT="" SONNET_PCT="" MONTH_PCT=""
 
 # Leave the epoch empty when no reset is sent — num("") is "0", which render_quota
 # would read as a past reset and wrongly zero the live percentage.
@@ -265,29 +394,32 @@ if [ "$HAVE_STDIN_SESSION" = 1 ]; then
     SESS_PCT="$J_RL_5H_PCT"
     [ -n "$J_RL_5H_RESET" ] && [ "$J_RL_5H_RESET" != "null" ] && SESS_EPOCH="$(num "$J_RL_5H_RESET")"
 fi
-if [ "$SHOW_WEEKLY" = "1" ] && [ -n "$J_RL_7D_PCT" ] && [ "$J_RL_7D_PCT" != "null" ]; then
+if [ "$PROVIDER" = "claude" ] && [ "$SHOW_WEEKLY" = "1" ] && [ -n "$J_RL_7D_PCT" ] && [ "$J_RL_7D_PCT" != "null" ]; then
     WEEK_PCT="$J_RL_7D_PCT"
 fi
 
-# Cache only fills metrics stdin didn't provide. The Sonnet weekly quota is
-# API-only (absent from stdin).
-if [ -f "$USAGE_FILE" ]; then
-    IFS=$'\x1f' read -r CACHE_SOURCE U_SESS_PCT U_SESS_RESETS U_WEEK_PCT U_SONNET_PCT \
+# Cache only fills metrics stdin didn't provide, and only when it belongs to the
+# selected provider (cache_is_usable: valid JSON + matching/legacy provider tag).
+# Sonnet weekly and Kimi monthly quotas are API-only (absent from stdin).
+if cache_is_usable; then
+    IFS=$'\x1f' read -r CACHE_SOURCE U_SESS_PCT U_SESS_RESETS U_WEEK_PCT U_SONNET_PCT U_MONTH_PCT \
         < <(jq -r '[
             (.source // "legacy"),
             (.metrics.session.percent_used     // ""),
             (.metrics.session.resets_at        // ""),
             (.metrics.week_all.percent_used    // ""),
-            (.metrics.week_sonnet.percent_used // "")
+            (.metrics.week_sonnet.percent_used // ""),
+            (.metrics.month_all.percent_used   // "")
         ] | join("\u001f")' "$USAGE_FILE" 2>/dev/null)
 
     if [ -z "$SESS_PCT" ] && [ -n "$U_SESS_PCT" ] && [ "$U_SESS_PCT" != "null" ]; then
         SESS_PCT="$U_SESS_PCT"; SESS_FROM_CACHE=1
-        [ "$CACHE_SOURCE" = "api" ] && [ -n "$U_SESS_RESETS" ] && SESS_EPOCH="$(iso_to_epoch "$U_SESS_RESETS")"
+        [ "$CACHE_SOURCE" = "api" ] && [ -n "$U_SESS_RESETS" ] && [ "$U_SESS_RESETS" != "null" ] && SESS_EPOCH="$(iso_to_epoch "$U_SESS_RESETS")"
     fi
     if [ "$SHOW_WEEKLY" = "1" ]; then
         [ -z "$WEEK_PCT" ] && [ -n "$U_WEEK_PCT" ] && [ "$U_WEEK_PCT" != "null" ] && WEEK_PCT="$U_WEEK_PCT"
         [ -n "$U_SONNET_PCT" ] && [ "$U_SONNET_PCT" != "null" ] && SONNET_PCT="$U_SONNET_PCT"
+        [ -n "$U_MONTH_PCT" ] && [ "$U_MONTH_PCT" != "null" ] && MONTH_PCT="$U_MONTH_PCT"
     fi
 fi
 
@@ -295,7 +427,7 @@ fi
 [ -n "$SESS_PCT" ] && [ "$SESS_PCT" != "null" ] && \
     BLOCK_DISPLAY="$(render_quota "session" "$SESS_PCT" "$SESS_EPOCH")"
 
-if [ "$SHOW_WEEKLY" = "1" ]; then
+if [ "$SHOW_WEEKLY" = "1" ] && [ "$PROVIDER" = "claude" ]; then
     WEEK_INT="" WEEK_BAR="" SONNET_INT="" SONNET_BAR=""
     if [ -n "$WEEK_PCT" ] && [ "$WEEK_PCT" != "null" ]; then
         WEEK_INT="$(num "$WEEK_PCT")"; make_bar "$WEEK_INT"; WEEK_BAR="$BAR_STR"
@@ -310,6 +442,11 @@ if [ "$SHOW_WEEKLY" = "1" ]; then
     elif [ -n "$SONNET_INT" ]; then
         WEEK_SONNET_DISPLAY="sonnet ${SONNET_BAR} ${SONNET_INT}%"
     fi
+elif [ "$SHOW_WEEKLY" = "1" ] && [ "$PROVIDER" = "kimi" ] && [ -n "$MONTH_PCT" ] && [ "$MONTH_PCT" != "null" ]; then
+    # Kimi has a monthly shared pool instead of a weekly one. limit_month_code is
+    # a part of that pool, not a separate quota, so it is not shown on its own.
+    MONTH_INT="$(num "$MONTH_PCT")"; make_bar "$MONTH_INT"
+    WEEK_SONNET_DISPLAY="monthly ${BAR_STR} ${MONTH_INT}%"
 fi
 
 # ── Stale marker — appended as plain text. Only when session came from the
